@@ -1,0 +1,99 @@
+# TASK A3 - Design the Analysis and Visualisation 
+import random, sqlite3, time, tracemalloc, statistics, textwrap 
+from collections import defaultdict 
+  
+# --------------------------------------------------------------------------- 
+# A3.1 CHOOSE THE CHARTS (the charts themselves are drawn in Task B1.4) 
+# --------------------------------------------------------------------------- 
+CHOICES = [ 
+    ("Trend of PM2.5 over a month", "LINE chart", 
+     "time on the x-axis; a line joins consecutive days so rises, falls and " 
+     "repeating weekly patterns are visible"), 
+    ("Comparison of stations", "BAR chart (or box plot)", 
+     "one category per station, bar height = mean PM2.5; easy to rank. A box " 
+     "plot also shows the spread and outliers"), 
+    ("Temperature vs PM2.5", "SCATTER plot", 
+     "both variables are numeric; every reading is one point, so we can see " 
+     "whether PM2.5 rises or falls with temperature (correlation)"), 
+    ("Hours with the worst air", "BAR chart of mean PM2.5 per hour (or " 
+     "HISTOGRAM of all readings)", 
+     "24 hour categories side by side show the peak hours; a histogram shows " 
+     "how readings are distributed"), 
+] 
+for question, chart, why in CHOICES: 
+    print(f"{question}\n   chart : {chart}") 
+    print(textwrap.fill(why, 84, initial_indent="   why   : ", 
+                        subsequent_indent="           ") + "\n") 
+  
+# --------------------------------------------------------------------------- 
+# A3.2 DAILY SUMMARY TABLE per station: min, max, mean, number of valid readings 
+# Produced by:  SELECT station, day, MIN(pm25), MAX(pm25), AVG(pm25), 
+#               COUNT(pm25) FROM readings GROUP BY station, day 
+# (COUNT(pm25) ignores NULLs, so it is the number of VALID readings) 
+# --------------------------------------------------------------------------- 
+def make_readings(stations, days, seed=3): 
+    rnd = random.Random(seed) 
+    rows = [] 
+    for s in range(stations): 
+        for d in range(days): 
+            for h in range(24): 
+                pm = round(50 + 8 * s + rnd.gauss(0, 10), 1) 
+                if rnd.random() < 0.05: 
+                    pm = None                  # about 5% missing readings 
+                rows.append((f"S{s+1:02d}", f"2026-10-{d+1:02d}", h, pm)) 
+    return rows 
+  
+small = make_readings(2, 2) 
+con = sqlite3.connect(":memory:") 
+con.execute("CREATE TABLE readings (station TEXT, day TEXT, hour INT, pm25 REAL)") 
+con.executemany("INSERT INTO readings VALUES (?,?,?,?)", small) 
+SQL = """SELECT station, day, MIN(pm25), MAX(pm25), ROUND(AVG(pm25), 1), COUNT(pm25) 
+         FROM readings GROUP BY station, day ORDER BY station, day""" 
+print(f"{'station':8}{'day':12}{'min':>7}{'max':>7}{'mean':>7}{'valid':>7}") 
+for row in con.execute(SQL): 
+    print(f"{row[0]:8}{row[1]:12}{row[2]:>7}{row[3]:>7}{row[4]:>7}{row[5]:>7}") 
+  
+# --------------------------------------------------------------------------- 
+# ALTERNATIVE: the same table with Python loops after reading ALL rows 
+# --------------------------------------------------------------------------- 
+def summary_python(rows): 
+    groups = defaultdict(list)                 # (station, day) -> all values 
+    for station, day, hour, pm in rows: 
+        if pm is not None: 
+            groups[(station, day)].append(pm)  # whole data kept in memory 
+    return {k: (min(v), max(v), round(statistics.mean(v), 1), len(v)) 
+            for k, v in sorted(groups.items())} 
+  
+python_result = summary_python(small) 
+9 
+sql_result = {(r[0], r[1]): tuple(r[2:]) for r in con.execute(SQL)} 
+print("\nPython loops and SQL GROUP BY agree:", python_result == sql_result) 
+  
+# Time and memory for n readings (12 stations, growing number of days) 
+print(f"\n{'n readings':>11} {'SQL time':>10} {'Python time':>12} " 
+      f"{'SQL mem KB':>11} {'Python mem KB':>14}") 
+for days in (10, 100, 365): 
+    rows = make_readings(12, days) 
+    con = sqlite3.connect(":memory:") 
+    con.execute("CREATE TABLE readings (station TEXT, day TEXT, hour INT, pm25 REAL)") 
+    con.executemany("INSERT INTO readings VALUES (?,?,?,?)", rows) 
+  
+    tracemalloc.start(); t = time.perf_counter() 
+    result_sql = con.execute(SQL).fetchall() 
+    t_sql = time.perf_counter() - t 
+    mem_sql = tracemalloc.get_traced_memory()[1] / 1024; tracemalloc.stop() 
+  
+    tracemalloc.start(); t = time.perf_counter() 
+    result_py = summary_python(rows) 
+    t_py = time.perf_counter() - t 
+    mem_py = tracemalloc.get_traced_memory()[1] / 1024; tracemalloc.stop() 
+    print(f"{len(rows):>11,} {t_sql:>9.4f}s {t_py:>11.4f}s {mem_sql:>11.0f} " 
+          f"{mem_py:>14.0f}") 
+# Time : both are O(n) - every reading is visited once. SQLite does it in 
+#        compiled C code, so it is usually faster by a constant factor; the 
+#        Python loop pays interpreter overhead on every row. 
+# Memory: the Python version keeps ALL n valid readings in lists before it 
+#        can compute min/max/mean: O(n). SQL GROUP BY keeps only a small 
+#        running aggregate per group (about O(groups)) while it scans rows. 
+# The Python version is still useful for checking the SQL result on small data 
+# and when the rule is too complex to write in SQL.

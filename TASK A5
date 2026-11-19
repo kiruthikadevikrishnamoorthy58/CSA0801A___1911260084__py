@@ -1,0 +1,173 @@
+# TASK A5 - Design an AI Application for Citizen Complaints 
+import math, re, sqlite3, time, tracemalloc 
+from collections import Counter 
+# --------------------------------------------------------------------------- 
+# A5.1(a) LEXICON-BASED SENTIMENT SCORER (handles negation) 
+# Design: +1 per positive word, -1 per negative word; if the PREVIOUS word is a 
+# negator (not, never, no) the sign flips:  "not good" = -1,  "not bad" = +1 
+# --------------------------------------------------------------------------- 
+POSITIVE = {"good", "clean", "fast", "helpful", "improved", "better", "fresh"} 
+NEGATIVE = {"bad", "dirty", "slow", "rude", "smoke", "broken", "polluted", "choking"} 
+NEGATORS = {"not", "never", "no"} 
+  
+def words_of(text): 
+    return re.sub(r"[^a-z' ]", " ", text.lower()).split() 
+  
+def score(text): 
+    words, total = words_of(text), 0 
+    for i, w in enumerate(words): 
+        value = 1 if w in POSITIVE else -1 if w in NEGATIVE else 0 
+        if value and i > 0 and words[i - 1] in NEGATORS: 
+            value = -value                      # negation flips the sign 
+        total += value 
+    return total 
+  
+def label(text): 
+    s = score(text) 
+    return "positive" if s > 0 else "negative" if s < 0 else "neutral" 
+  
+print("--- Sentiment scorer ---") 
+for c in ["The air is good today.", "The air is not good today.", 
+          "Not bad, service improved.", "Smoke and dirty roads, very bad."]: 
+    print(f"{label(c):9}({score(c):+d}) | {c}") 
+  
+# --------------------------------------------------------------------------- 
+# A5.1(b) EXTRACTIVE SUMMARISER: pick the sentences that contain the most 
+# frequent important words (stop words such as 'the', 'is' are ignored) 
+# --------------------------------------------------------------------------- 
+STOP = {"the", "a", "an", "is", "are", "was", "were", "of", "in", "on", "at", "and", 
+        "to", "it", "this", "that", "for", "from", "with", "by", "our", "we", "has"} 
+  
+def summarise(text, n_sentences=2): 
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()] 
+    freq = Counter(w for w in words_of(text) if w not in STOP) 
+    def sentence_score(sentence): 
+        ws = [w for w in words_of(sentence) if w not in STOP] 
+        return sum(freq[w] for w in ws) / (len(ws) or 1)   # avoid long-sentence bias 
+    best = sorted(sentences, key=sentence_score, reverse=True)[:n_sentences] 
+    return [s for s in sentences if s in best]             # keep original order 
+  
+COMPLAINTS = ("The smoke from the factory near Guindy is choking the whole street. " 
+              "Smoke has been coming every night this week. The bus was fast today. " 
+              "Children in the school near the factory cough because of the smoke. " 
+              "The tea at the stall was good.") 
+print("\n--- Summariser (2 sentences) ---") 
+for s in summarise(COMPLAINTS): 
+    print(" *", s) 
+  
+# --------------------------------------------------------------------------- 
+# A5.2 RULE-BASED CHATBOT: keyword matching + a database query 
+# --------------------------------------------------------------------------- 
+con = sqlite3.connect(":memory:") 
+con.execute("CREATE TABLE latest (station TEXT, day TEXT, pm25 REAL, pm10 REAL, " 
+            "no2 REAL, temp REAL)") 
+con.executemany("INSERT INTO latest VALUES (?,?,?,?,?,?)", [ 
+    ("Adyar", "2026-10-31", 62.4, 110.0, 31.5, 29.1), 
+14 
+    ("Guindy", "2026-10-31", 88.9, 150.2, 40.7, 30.2), 
+    ("Manali", "2026-10-31", 121.3, 190.8, 55.0, 28.4)]) 
+STATIONS = [r[0] for r in con.execute("SELECT station FROM latest")] 
+KEYWORDS = {"pm2.5": "pm25", "pm25": "pm25", "pm10": "pm10", "no2": "no2", 
+            "temperature": "temp", "temp": "temp"} 
+UNITS = {"pm25": "ug/m3", "pm10": "ug/m3", "no2": "ug/m3", "temp": "C"} 
+NAMES = {"pm25": "PM2.5", "pm10": "PM10", "no2": "NO2", "temp": "Temperature"} 
+  
+def chatbot(question): 
+    q = question.lower() 
+    station = next((s for s in STATIONS if s.lower() in q), None) 
+    column = next((col for key, col in KEYWORDS.items() if key in q), None) 
+    if column is None: 
+        return "Sorry, I can answer about PM2.5, PM10, NO2 and temperature." 
+    if station is None: 
+        return "Which station? I know: " + ", ".join(STATIONS) + "." 
+    # the column name comes from OUR fixed dictionary; the station is a 
+    # ? placeholder, so user text is never pasted into the SQL 
+    value = con.execute(f"SELECT {column} FROM latest WHERE station = ? " 
+                        "ORDER BY day DESC LIMIT 1", (station,)).fetchone()[0] 
+    return f"{NAMES[column]} in {station} today is {value} {UNITS[column]}." 
+  
+print("\n--- Chatbot ---") 
+for q in ["What is the PM2.5 in Adyar today?", "temperature at manali?", 
+          "Is the air safe for my child in Guindy?", "What is the NO2 level?"]: 
+    print("Q:", q, "\nA:", chatbot(q)) 
+# LIMITATIONS of the rule-based bot: (1) only knows fixed keywords - "dust", 
+# "fine particles" or spelling mistakes ("Adyr") are not understood; 
+# (2) no meaning/context: it cannot answer "is it safe?" or follow-up 
+# questions like "and yesterday?"; (3) "today" is assumed, dates and time 
+# ranges are not parsed; (4) only one station and one pollutant per question; 
+# (5) every new question type needs a new rule written by hand. 
+  
+# --------------------------------------------------------------------------- 
+# ALTERNATIVE: a trained Naive Bayes classifier instead of the word list 
+# (small training set written for this test; labels are my own reading) 
+# --------------------------------------------------------------------------- 
+TRAIN = [("clean air and fast bus service", "positive"), 
+         ("the new filter made the air fresh and good", "positive"), 
+         ("helpful staff and improved roads", "positive"), 
+         ("pollution is much better this month", "positive"), 
+         ("good work by the board", "positive"), 
+         ("very happy with the quick response", "positive"), 
+         ("thick smoke and dirty air every night", "negative"), 
+         ("factory smoke is choking us", "negative"), 
+         ("the officer was rude and slow", "negative"), 
+         ("broken sensor and polluted river", "negative"), 
+         ("bad smell and bad air near the dump", "negative"), 
+         ("nobody answers our complaints", "negative")] 
+TEST = [("air is clean and fresh today", "positive"), 
+        ("smoke from the factory again", "negative"), 
+        ("quick and helpful response", "positive"), 
+        ("rude staff and slow service", "negative"), 
+        ("the dump smells terrible", "negative"), 
+        ("not good, the air is not clean", "negative")] 
+  
+def train_nb(data): 
+    counts = {"positive": Counter(), "negative": Counter()} 
+    docs = Counter() 
+    for text, lab in data: 
+        counts[lab].update(words_of(text)); docs[lab] += 1 
+    vocab = {w for c in counts.values() for w in c} 
+    return counts, docs, vocab 
+  
+def predict_nb(model, text): 
+    counts, docs, vocab = model 
+    best, best_lp = None, -math.inf 
+    for lab in counts: 
+        total = sum(counts[lab].values()) 
+        lp = math.log(docs[lab] / sum(docs.values())) 
+        for w in words_of(text): 
+15 
+            lp += math.log((counts[lab][w] + 1) / (total + len(vocab)))  # Laplace 
+        if lp > best_lp: 
+            best, best_lp = lab, lp 
+    return best 
+  
+tracemalloc.start() 
+model = train_nb(TRAIN) 
+nb_memory = tracemalloc.get_traced_memory()[1]; tracemalloc.stop() 
+lex_ok = sum(label(t) == y for t, y in TEST) 
+nb_ok = sum(predict_nb(model, t) == y for t, y in TEST) 
+print("\n--- Lexicon vs Naive Bayes on 6 test complaints ---") 
+for t, y in TEST: 
+    print(f"{y:9} lexicon={label(t):9} naive-bayes={predict_nb(model, t):9} | {t}") 
+print(f"accuracy: lexicon {lex_ok}/6, naive bayes {nb_ok}/6") 
+  
+reps = 20_000 
+t = time.perf_counter() 
+for _ in range(reps): label(TEST[0][0]) 
+t_lex = (time.perf_counter() - t) / reps 
+t = time.perf_counter() 
+for _ in range(reps): predict_nb(model, TEST[0][0]) 
+t_nb = (time.perf_counter() - t) / reps 
+print(f"time per complaint: lexicon {t_lex*1e6:.1f} us | naive bayes {t_nb*1e6:.1f} us") 
+print(f"memory: lexicon = 3 small sets; naive bayes training peak " 
+      f"{nb_memory/1024:.1f} KB for {len(model[2])} words") 
+# Time : lexicon O(w) for w words per complaint (set lookups). Naive Bayes is 
+#        O(w x classes) per complaint but needs training once, O(total words). 
+# Memory: lexicon - a few hundred words; Naive Bayes - one count per word per 
+#        class (grows with vocabulary: MBs for real data); a pre-trained 
+#        language model needs hundreds of MB to several GB and typically 10-100 
+#        ms per complaint on a CPU (typical figures, NOT measured here). 
+# Accuracy: with enough labelled data a trained model learns words and 
+#        phrases the lexicon lacks and usually beats it; with tiny data (as 
+#        above) it is not better. Neither handles sarcasm well; large language 
+#        models handle context better but are costly and harder to explain.

@@ -1,0 +1,169 @@
+# TASK B2 - Engineer Adversarial Data 
+import csv, io, sqlite3, time 
+# =========================================================================== 
+# PART 1: BAD FILES - missing column, wrong delimiter, other encoding, empty 
+# =========================================================================== 
+REQUIRED = ["station", "date", "pm25"] 
+def load_file(raw_bytes): 
+    """Defensive loader: returns (rows, message). Never crashes.""" 
+    if not raw_bytes.strip(): 
+        return [], "REJECTED: file is empty" 
+    try: 
+        text = raw_bytes.decode("utf-8") 
+    except UnicodeDecodeError: 
+        text = raw_bytes.decode("latin-1")              # fall back, then warn 
+        note = " (decoded as latin-1, not UTF-8)" 
+    else: 
+        note = "" 
+    first_line = text.splitlines()[0] 
+    if "," not in first_line: 
+        return [], f"REJECTED: expected comma delimiter, header was {first_line!r}" 
+    reader = csv.DictReader(io.StringIO(text)) 
+    missing = [c for c in REQUIRED if c not in (reader.fieldnames or [])] 
+    if missing: 
+        return [], f"REJECTED: missing column(s) {missing}" 
+    rows = [r for r in reader if r["pm25"].strip() not in ("", "NA")] 
+    return rows, f"ACCEPTED: {len(rows)} usable row(s){note}" 
+TESTS = { 
+    "good file":        b"station,date,pm25\nAdyar,2026-10-01,48\n", 
+    "missing column":   b"station,date\nAdyar,2026-10-01\n", 
+    "wrong delimiter":  b"station;date;pm25\nAdyar;2026-10-01;48\n", 
+    "other encoding":   "station,date,pm25\nAdy\u00e4r,2026-10-01,48\n".encode("latin-1"), 
+    "empty file":       b"", 
+} 
+for name, content in TESTS.items(): 
+    rows, message = load_file(content) 
+    print(f"{name:16} -> {message}") 
+# What each reveals: the loader must CHECK its input instead of trusting it. 
+# Without the checks: a missing column gives a KeyError in the middle of the 
+# loop; a wrong delimiter makes the whole line ONE column (also a KeyError); a 
+# different encoding raises UnicodeDecodeError or silently shows wrong 
+# letters; an empty file has no header, so DictReader returns nothing and the 
+# program may report "average = 0" or divide by zero. 
+# =========================================================================== 
+# PART 2: SQL INJECTION - quote character in a station name 
+# =========================================================================== 
+readings = [("Adyar", "2026-10-01", 48.0), ("Guindy", "2026-10-01", 95.0), 
+            ("Guindy", "2026-10-03", 121.0), ("Adyar", "2026-10-04", 60.0)] 
+  
+con = sqlite3.connect(":memory:") 
+con.execute("CREATE TABLE aq (station TEXT, day TEXT, pm25 REAL)") 
+# TODO 1: insert all readings with ONE executemany call using ? placeholders, 
+#         then commit 
+con.executemany("INSERT INTO aq VALUES (?, ?, ?)", readings) 
+con.commit() 
+  
+def station_average(name): 
+    # TODO 2: parameterised SELECT ... WHERE station = ? 
+    row = con.execute("SELECT AVG(pm25) FROM aq WHERE station = ?", (name,)).fetchone() 
+    return row[0] 
+  
+print() 
+print(station_average("Adyar"), station_average("Guindy")) 
+23 
+print(station_average("Adyar' OR '1'='1"))   # an injection attempt finds nothing 
+  
+# Why the injection returns None: with a ? placeholder the whole text 
+# "Adyar' OR '1'='1" is sent as ONE DATA VALUE. SQLite looks for a station 
+# literally named that; no row matches, AVG of no rows is NULL -> None. 
+# The quote inside the value is just a character, never part of the SQL. 
+# --------------------------------------------------------------------------- 
+# Building the SQL with + (or an f-string): what happens 
+# --------------------------------------------------------------------------- 
+def station_average_unsafe(name): 
+    sql = "SELECT AVG(pm25) FROM aq WHERE station = '" + name + "'" 
+    return sql, con.execute(sql).fetchone()[0] 
+  
+print("\nUNSAFE string-built query") 
+sql, value = station_average_unsafe("Adyar") 
+print(" normal input    :", sql, "->", value) 
+sql, value = station_average_unsafe("Adyar' OR '1'='1") 
+print(" injection input :", sql, "\n   -> ", value, "(average of ALL rows - leaked)") 
+try: 
+    station_average_unsafe("O'Brien")           # a harmless name with a quote 
+except sqlite3.OperationalError as error: 
+    print(" name with quote : ERROR ->", error) 
+print(" safe version, name with quote:", station_average("O'Brien")) 
+# With string building the quote in the input ends the text early and the rest 
+# ("OR '1'='1'") becomes SQL: the condition is always true, so every row is 
+# returned. A real attacker could also add DROP TABLE or read other tables. 
+# An honest name containing an apostrophe even makes the query crash. 
+  
+# =========================================================================== 
+# executemany() versus execute() in a loop: time for n rows 
+# =========================================================================== 
+print(f"\n{'rows':>9} {'execute loop':>13} {'executemany':>12}") 
+for n in (1_000, 10_000, 100_000): 
+    data = [("Adyar", "2026-10-01", float(i)) for i in range(n)] 
+    c1 = sqlite3.connect(":memory:") 
+    c1.execute("CREATE TABLE aq (station TEXT, day TEXT, pm25 REAL)") 
+    t = time.perf_counter() 
+    for row in data: 
+        c1.execute("INSERT INTO aq VALUES (?, ?, ?)", row) 
+    c1.commit(); t_loop = time.perf_counter() - t 
+    c2 = sqlite3.connect(":memory:") 
+    c2.execute("CREATE TABLE aq (station TEXT, day TEXT, pm25 REAL)") 
+    t = time.perf_counter() 
+    c2.executemany("INSERT INTO aq VALUES (?, ?, ?)", data) 
+    c2.commit(); t_many = time.perf_counter() - t 
+    print(f"{n:>9,} {t_loop:>12.4f}s {t_many:>11.4f}s") 
+# Both are O(n): every row is inserted once. executemany() runs the loop 
+# inside C and prepares the statement once, so its constant per row is smaller 
+# (less Python overhead). On a FILE database, commit once at the end in both 
+# cases - committing after every row would be far slower (disk write each time). 
+  
+# =========================================================================== 
+# PART 3: SENTIMENT SCORER - sarcasm, double negatives, mixed opinions 
+# =========================================================================== 
+POSITIVE = {"good", "clean", "fast", "helpful", "improved"} 
+NEGATIVE = {"bad", "dirty", "slow", "rude", "smoke", "broken"} 
+NEGATORS = {"not", "never", "no"} 
+  
+def score(text): 
+    words = text.lower().replace(".", " ").replace(",", " ").split() 
+    total = 0 
+    for i, w in enumerate(words): 
+        value = 1 if w in POSITIVE else -1 if w in NEGATIVE else 0 
+        if value and i > 0 and words[i - 1] in NEGATORS: 
+            value = -value 
+        total += value 
+    return total 
+  
+def label(text): 
+    s = score(text) 
+24 
+    return "positive" if s > 0 else "negative" if s < 0 else "neutral" 
+  
+ADVERSARIAL = [ 
+    ("Oh great, another smoky day. Wonderful.",        "negative", "sarcasm"), 
+    ("Thanks for the fast response, only 3 weeks.",    "negative", "sarcasm"), 
+    ("The service is not never helpful.",              "positive", "double negative"), 
+    ("It is not that the air is not clean.",           "positive", "double negative"), 
+    ("The staff were helpful but the air is dirty.",   "negative", "mixed opinion"), 
+    ("Clean roads, good buses, but slow and rude officers.", "negative", "mixed"), 
+    ("Not very good.",                                 "negative", "negator + gap"), 
+] 
+print("\n--- Sentiment scorer on adversarial sentences ---") 
+wrong = 0 
+for text, truth, kind in ADVERSARIAL: 
+    got = label(text) 
+    wrong += got != truth 
+    print(f"{'ok  ' if got == truth else 'FAIL'} {kind:16} expected {truth:9} " 
+          f"got {got}") 
+    print(f"     \"{text}\"") 
+print(f"failures: {wrong} of {len(ADVERSARIAL)}") 
+  
+# WHAT EACH ADVERSARIAL INPUT REVEALS ABOUT THE DESIGN 
+#  - Sarcasm: the scorer reads WORDS, not intention. Positive words used 
+#    ironically score +; it has no knowledge of tone, context or facts. 
+#  - Double negative: it only looks at the ONE previous word, so "not never 
+#    helpful" flips only once and the pairing logic is too shallow. 
+#  - Mixed opinions: the total of +1 and -1 hides what the person said about 
+#    each topic; a net score of 0 becomes "neutral" although the text is 
+#    strongly critical. Splitting the text into clauses at "but" would help. 
+#  - Vocabulary: "smoky" is not "smoke" - the word list needs word forms 
+#    (stemming) and cannot cover every spelling or language. 
+#  - Negator gap: "not very good" fails because the negator must be directly 
+#    before the word. 
+# Lesson: the lexicon scorer is fast and explainable but brittle; the design 
+# should report low-confidence cases for a human to read instead of guessing.

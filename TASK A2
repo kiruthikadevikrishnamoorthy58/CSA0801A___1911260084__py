@@ -1,0 +1,156 @@
+# TASK A2 - Design the Cleaning and Normalisation 
+import csv, io, statistics, time, random 
+from datetime import datetime 
+  
+RAW = """station,date,hour,pm25,temp 
+adyar,2026-10-01,0,48,27.5 
+adyar,2026-10-01,1,,27.1 
+adyar,2026-10-01,2,NA,26.8 
+adyar,2026-10-01,3,-5,26.5 
+adyar,2026-10-01,4,5400,26.2 
+ ADYAR ,01/10/2026,5,52,26.0 
+ ADYAR ,01/10/2026,5,52,26.0 
+guindy,2026-10-01,0,95,80.6 
+guindy,2026-10-01,1,100,82.4 
+guindy,2026-10-01,2,110,84.2 
+"""
+F_STATIONS = {"Guindy"}          # the 2 stations that report in Fahrenheit 
+                                 # (only one appears in this small sample) 
+  
+# --------------------------------------------------------------------------- 
+# A2.1 CLEANING RULES (with justification) 
+# --------------------------------------------------------------------------- 
+# Rule 1  MISSING (blank / 'NA')  -> keep the row, store pm25 as None, then 
+#         fill with the PREVIOUS value (forward fill) for short gaps. 
+#         Why: air quality changes slowly hour to hour, so the last reading is 
+#         a good estimate; dropping rows would shorten the day and bias the 
+#         daily average toward the hours that happened to work. 
+# Rule 2  IMPOSSIBLE (pm25 < 0 or > 999) -> treat as a sensor fault = missing. 
+#         Why: concentrations cannot be negative; 999 ug/m3 is the top of the 
+#         instrument range, so larger values are faults, not real air. 
+# Rule 3  DUPLICATE rows (same station, date, hour) -> keep the first only. 
+#         Why: a repeated row is a transmission error and would count one hour 
+#         twice in the average. 
+# Rule 4  FAHRENHEIT -> convert with C = (F - 32) * 5 / 9 for the stations 
+#         that report F, so all temperatures are in Celsius. 
+# --------------------------------------------------------------------------- 
+def to_iso(date_text): 
+    """A2.3: every date becomes YYYY-MM-DD.""" 
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"): 
+        try: 
+            return datetime.strptime(date_text.strip(), fmt).strftime("%Y-%m-%d") 
+        except ValueError: 
+            pass 
+    raise ValueError(f"unknown date format: {date_text!r}") 
+  
+def parse_pm(text): 
+    text = text.strip() 
+    if text in ("", "NA"): 
+        return None                              # Rule 1 
+    value = float(text) 
+    if value < 0 or value > 999: 
+        return None                              # Rule 2 
+    return value 
+  
+def clean(text, fill="ffill"): 
+    rows, seen = [], set() 
+    for r in csv.DictReader(io.StringIO(text)): 
+        station = r["station"].strip().title()   # A2.3: 'ADYAR' -> 'Adyar' 
+        key = (station, to_iso(r["date"]), int(r["hour"])) 
+        if key in seen:                          # Rule 3 
+            continue 
+        seen.add(key) 
+        temp = float(r["temp"]) 
+        if station in F_STATIONS:                # Rule 4 
+            temp = (temp - 32) * 5 / 9 
+        rows.append([station, key[1], key[2], parse_pm(r["pm25"]), round(temp, 1)]) 
+    if fill == "ffill":                          # fill with the previous value 
+6 
+        last = None 
+        for row in rows: 
+            if row[3] is None: 
+                row[3] = last 
+            else: 
+                last = row[3] 
+    elif fill == "median":                       # fill with the median 
+        med = statistics.median(r[3] for r in rows if r[3] is not None) 
+        for row in rows: 
+            if row[3] is None: 
+                row[3] = med 
+    elif fill == "drop":                         # drop the rows 
+        rows = [r for r in rows if r[3] is not None] 
+    return rows 
+  
+print("BEFORE cleaning:") 
+print(RAW) 
+print("AFTER cleaning (forward fill):") 
+for row in clean(RAW): 
+    print(" ", row) 
+  
+# --------------------------------------------------------------------------- 
+# A2.2 NORMALISATION of PM2.5 
+# --------------------------------------------------------------------------- 
+def min_max(values): 
+    """(v - min) / (max - min)  -> 0 to 1. Good for charts, colour scales and 
+    models that need a fixed range. Sensitive to outliers (one extreme value 
+    squeezes all others together).""" 
+    lo, hi = min(values), max(values) 
+    return [round((v - lo) / (hi - lo), 3) for v in values] 
+  
+def z_score(values): 
+    """(v - mean) / standard deviation -> mean 0, spread 1. Good for comparing 
+    stations with different levels, for finding outliers (|z| > 3) and for 
+    statistical methods; values are not limited to 0-1.""" 
+    mean, sd = statistics.mean(values), statistics.pstdev(values) 
+    return [round((v - mean) / sd, 3) for v in values] 
+  
+pm = [r[3] for r in clean(RAW)] 
+print("\nPM2.5 values   :", pm) 
+print("min-max (0-1)  :", min_max(pm)) 
+print("z-score        :", z_score(pm)) 
+  
+# --------------------------------------------------------------------------- 
+# A2.3 STANDARD FORMATS in the cleaned data 
+# --------------------------------------------------------------------------- 
+STANDARD = {"date": "YYYY-MM-DD text (2026-10-01)", 
+            "hour": "integer 0-23", 
+            "station": "Title Case, no extra spaces (Adyar)", 
+            "pm25": "float, 1 decimal, ug/m3, None if unknown", 
+            "temp": "float, 1 decimal, degrees Celsius"} 
+print("\nStandard formats:") 
+for k, v in STANDARD.items(): 
+    print(f"  {k:8} {v}") 
+  
+# --------------------------------------------------------------------------- 
+# ALTERNATIVE: DROP missing readings instead of filling them 
+# --------------------------------------------------------------------------- 
+print("\nEffect of the missing-value rule on Adyar's daily average PM2.5:") 
+adyar = [r for r in RAW.splitlines()[1:] if "adyar" in r.lower()] 
+adyar_text = "station,date,hour,pm25,temp\n" + "\n".join(adyar) 
+for how in ("drop", "ffill", "median"): 
+    vals = [r[3] for r in clean(adyar_text, fill=how)] 
+    print(f"  {how:7} -> {len(vals)} hours used, mean = {statistics.mean(vals):.2f}") 
+# Dropping uses fewer hours; if the gaps happen at the high-pollution hours the 
+# daily mean is biased low. ffill keeps all 24 hours and follows the trend; 
+# median pulls the filled values towards the typical level (flattens peaks). 
+  
+# Time and space (n readings): measured on 200,000 readings 
+random.seed(2) 
+vals = [random.choice([None, 40.0, 55.5, 70.2, 90.1]) for _ in range(200_000)] 
+7 
+t = time.perf_counter(); dropped = [v for v in vals if v is not None] 
+t_drop = time.perf_counter() - t 
+t = time.perf_counter() 
+last, filled = None, [] 
+for v in vals: 
+    last = v if v is not None else last 
+    filled.append(last) 
+t_ffill = time.perf_counter() - t 
+t = time.perf_counter(); median = statistics.median(dropped) 
+t_median = time.perf_counter() - t 
+print(f"\nn = 200,000 readings: drop {t_drop:.4f}s | forward fill {t_ffill:.4f}s" 
+      f" | median (sorting) {t_median:.4f}s") 
+# Time : drop O(n) and forward fill O(n) (one pass); median by sorting 
+#        O(n log n) - the slowest of the three. 
+# Space: drop builds a SHORTER list (<= n); forward fill builds a list of n 
+#        values; the median needs a sorted copy of the valid values, O(n).

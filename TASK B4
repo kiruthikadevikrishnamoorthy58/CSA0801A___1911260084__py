@@ -1,0 +1,222 @@
+# TASK B4 - Final Engineering Decision (100 more stations, 50,000 complaints/month) 
+import random, re, sqlite3, textwrap, time 
+from collections import Counter   
+# =========================================================================== 
+# THE PROGRAM FROM THE QUESTION (TODO 1 completed) 
+# =========================================================================== 
+POSITIVE = {"good", "clean", "fast", "helpful", "improved"} 
+NEGATIVE = {"bad", "dirty", "slow", "rude", "smoke", "broken"} 
+NEGATORS = {"not", "never", "no"}
+def score(text): 
+    """+1 per positive word, -1 per negative word; a preceding negator flips it.""" 
+    words = text.lower().replace(".", " ").replace(",", " ").split() 
+    total = 0 
+    # TODO 1: value of each word (+1, -1 or 0); flip the sign if the previous 
+    #         word is a negator; add it to total 
+    for i, w in enumerate(words): 
+        value = 1 if w in POSITIVE else -1 if w in NEGATIVE else 0 
+        if i > 0 and words[i - 1] in NEGATORS: 
+            value = -value                      # 'not good' -> -1, 'not bad' -> +1 
+        total += value 
+    return total 
+  
+def label(text): 
+    s = score(text) 
+    return "positive" if s > 0 else "negative" if s < 0 else "neutral" 
+  
+for c in ["Roads are clean and the bus was fast.", 
+          "Smoke from the factory, air is bad.", 
+          "The staff were not helpful.", 
+          "Not bad, service improved."]: 
+    print(f"{label(c):8} | {c}") 
+  
+# =========================================================================== 
+# B4.1 IMPLEMENT ON 50+ COMPLAINTS and compare with MY OWN READING 
+# (the human label in the second column is written by reading each complaint; 
+#  the student should read them and change any label they disagree with) 
+# =========================================================================== 
+COMPLAINTS = [ ("Roads are clean and the bus was fast.", "positive"), 
+    ("The staff were very helpful today.", "positive"), 
+    ("Air quality has improved a lot near our school.", "positive"), 
+    ("Good work by the control board.", "positive"), 
+    ("The new sensor at Adyar is working well.", "positive"), 
+    ("The complaint was solved quickly, thank you.", "positive"), 
+    ("Not bad, service improved.", "positive"), 
+    ("The market area is clean now.", "positive"), 
+    ("Fast response from the officer.", "positive"), 
+    ("The park is fresh and green after the tree planting.", "positive"), 
+    ("Helpful staff and a clean office.", "positive"), 
+    ("Pollution never looked this good before.", "positive"), 
+    ("The factory has stopped the smoke at last.", "positive"), 
+    ("Very happy with the quick action.", "positive"), 
+    ("Smoke from the factory, air is bad.", "negative"), 
+    ("The staff were not helpful.", "negative"), 
+    ("Dirty drains and bad smell everywhere.", "negative"), 
+    ("The officer was rude and slow.", "negative"), 
+    ("Broken sensor outside the market.", "negative"), 
+    ("Thick smoke every night near Guindy.", "negative"), 
+    ("The air is not clean at all.", "negative"), 
+    ("Nobody answers our complaints.", "negative"), 
+    ("Garbage burning near the school is choking the children.", "negative"), 
+    ("The bus was slow and dirty.", "negative"), 
+    ("Not good, the water is dirty.", "negative"), 
+    ("It stinks near the dump.", "negative"), 
+    ("Bad roads, broken lights and rude drivers.", "negative"), 
+30 
+    ("Dust from construction is terrible.", "negative"), 
+    ("The response was slow, nobody came.", "negative"), 
+    ("No clean water, no help.", "negative"), 
+    ("Smoke again today, very bad.", "negative"), 
+    ("The air is so bad that we cannot breathe.", "negative"), 
+    ("The new road is broken already.", "negative"), 
+    ("Never a fast reply from the office.", "negative"), 
+    ("Great, another smoky morning.", "negative"), 
+    ("Thanks for the fast response, only after 3 weeks.", "negative"), 
+    ("The monitoring station is at the corner of Mount Road.", "neutral"), 
+    ("What is the PM2.5 in Adyar today?", "neutral"), 
+    ("Please send the report for October.", "neutral"), 
+    ("The meeting is on Monday at 10.", "neutral"), 
+    ("The board has 12 stations.", "neutral"), 
+    ("I want to know the schedule of the water truck.", "neutral"), 
+    ("Complaint registered on 2026-10-14.", "neutral"), 
+    ("The factory is located near the bus stand.", "neutral"), 
+    ("How do I upload a photo of the smoke?", "neutral"), 
+    ("The station reports every hour.", "neutral"), 
+    ("The staff were helpful but the air is dirty.", "negative"), 
+    ("Clean roads, but slow and rude officers.", "negative"), 
+    ("The bus is fast, but the smoke from it is bad.", "negative"), 
+    ("Good idea, bad execution.", "neutral"), 
+    ("The air is good in the morning but the evening smoke is bad.", "negative"), 
+    ("Air improved, but still not clean.", "negative"), 
+] 
+agree = [(t, y, label(t)) for t, y in COMPLAINTS if label(t) == y] 
+miss = [(t, y, label(t)) for t, y in COMPLAINTS if label(t) != y] 
+print(f"\nComplaints: {len(COMPLAINTS)} | labels that agree with my reading: " 
+      f"{len(agree)} ({100 * len(agree) / len(COMPLAINTS):.0f}%)") 
+confusion = Counter((y, l) for _, y, l in miss) 
+print("Disagreements (my label -> program label):") 
+for (mine, prog), count in sorted(confusion.items()): 
+    print(f"  {mine:8} -> {prog:8} : {count}") 
+print("Examples of disagreement:") 
+for t, y, l in miss[:6]: 
+    print(f"  mine={y:8} program={l:8} | {t}") 
+# Where it fails: words that are not in the lists ('stinks', 'terrible', 
+# 'choking', 'nobody'), sarcasm, and mixed opinions. 
+  
+# --- extractive summariser (from A5): most frequent important words --- 
+STOP = {"the", "a", "an", "is", "are", "was", "were", "of", "in", "on", "at", "and", 
+        "to", "it", "this", "that", "for", "from", "with", "by", "our", "we", "has"} 
+def words_of(text): 
+    return re.sub(r"[^a-z' ]", " ", text.lower()).split() 
+  
+def summarise(text, n=3): 
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()] 
+    freq = Counter(w for w in words_of(text) if w not in STOP) 
+    def sc(s): 
+        ws = [w for w in words_of(s) if w not in STOP] 
+        return sum(freq[w] for w in ws) / (len(ws) or 1) 
+    best = sorted(sentences, key=sc, reverse=True)[:n] 
+    return [s for s in sentences if s in best] 
+negative_text = " ".join(t for t, y in COMPLAINTS if y == "negative") 
+print("\nSummary of the negative complaints (3 sentences):") 
+for s in summarise(negative_text): 
+    print(" *", s) 
+# =========================================================================== 
+# B4.2 CHECK THE DATABASE: index on (station, day), effect on the slowest query 
+# =========================================================================== 
+random.seed(8) 
+STATIONS = 112                                   # 12 existing + 100 new stations 
+DAYS, PER_DAY = 60, 96                           # 96 readings/day = every 15 min 
+  
+def generate(): 
+    for s in range(1, STATIONS + 1): 
+        for d in range(DAYS): 
+            day = f"2026-{9 + d // 30:02d}-{d % 30 + 1:02d}" 
+31 
+            for k in range(PER_DAY): 
+                yield (f"S{s:03d}", day, k, round(random.gauss(70, 15), 1)) 
+  
+con = sqlite3.connect(":memory:") 
+con.execute("CREATE TABLE readings (station TEXT, day TEXT, slot INT, pm25 REAL)") 
+t = time.perf_counter() 
+con.executemany("INSERT INTO readings VALUES (?,?,?,?)", generate()) 
+con.commit() 
+n_rows = con.execute("SELECT COUNT(*) FROM readings").fetchone()[0] 
+print(f"\nLoaded {n_rows:,} readings in {time.perf_counter() - t:.2f}s") 
+  
+QUERIES = { 
+    "A: mean of one station, one month": 
+        ("SELECT AVG(pm25) FROM readings WHERE station = 'S050' " 
+         "AND day BETWEEN '2026-09-01' AND '2026-09-30'"), 
+    "B: days above 80 for one station": 
+        ("SELECT COUNT(*) FROM (SELECT day FROM readings WHERE station = 'S050' " 
+         "GROUP BY day HAVING AVG(pm25) > 80)"), 
+    "C: mean per hour, all stations": 
+        "SELECT slot / 4 AS hour, AVG(pm25) FROM readings GROUP BY hour", 
+} 
+  
+def run(sql, repeat): 
+    t = time.perf_counter() 
+    for _ in range(repeat): 
+        con.execute(sql).fetchall() 
+    return (time.perf_counter() - t) / repeat 
+  
+before = {name: run(sql, 5) for name, sql in QUERIES.items()} 
+PLAN_A = "EXPLAIN QUERY PLAN " + QUERIES["A: mean of one station, one month"] 
+print("Query plan for A BEFORE the index:", con.execute(PLAN_A).fetchone()[3]) 
+con.execute("CREATE INDEX idx_station_day ON readings(station, day)") 
+print(textwrap.fill("Query plan for A AFTER the index : " 
+                    + con.execute(PLAN_A).fetchone()[3], 86, 
+                    subsequent_indent="    ")) 
+after = {name: run(sql, 5) for name, sql in QUERIES.items()} 
+print(f"\n{'query':36}{'before':>10}{'after':>10}{'speed-up':>10}") 
+for name in QUERIES: 
+    print(f"{name:36}{before[name]*1000:>8.2f}ms{after[name]*1000:>8.2f}ms" 
+          f"{before[name] / after[name]:>9.1f}x") 
+# The index helps queries that pick ONE station / a date range (A and B): the 
+# database jumps straight to those rows (about O(log n + k)) instead of scanning 
+# all n rows. Query C needs every row, so it is still a full scan O(n); the 
+# index brings no benefit there (and costs extra disk space and insert time). 
+  
+# =========================================================================== 
+# B4.3 PRODUCTION DECISION, using my measurements 
+# =========================================================================== 
+readings_day = STATIONS * PER_DAY 
+t = time.perf_counter() 
+for text, _ in COMPLAINTS * 100: 
+    label(text) 
+per_complaint = (time.perf_counter() - t) / (len(COMPLAINTS) * 100) 
+print("\nNew scale:") 
+print(f"  readings per day : {readings_day:,}   per year: {readings_day * 365:,}") 
+print(f"  complaints       : 50,000 per month = {50000 / 30:,.0f} per day") 
+print(f"  lexicon scorer   : {per_complaint * 1e6:.1f} us per complaint -> " 
+      f"{per_complaint * 50000:.2f} s for a whole month") 
+print(f"  accuracy (my labels): {100 * len(agree) / len(COMPLAINTS):.0f}% on " 
+      f"{len(COMPLAINTS)} complaints") 
+  
+# DECISION 
+#  STORE   : keep SQLite (or a server database later) with the table normalised 
+#            as in A1 plus the index on (station, day). About 10,752 new rows 
+#            per day is small for a database: loading a day takes milliseconds 
+#            with executemany, and the measured indexed queries are fast. 
+#            Move to a server database (PostgreSQL) only if many users or 
+#            programs must write at the same time - SQLite allows one writer. 
+#  CLEAN   : clean each day's files in a daily batch job (pandas for the big 
+#            historical loads, the csv-module cleaner for the small daily 
+#            files), validate with the A4 assert/logging checks, store, never 
+32 
+#            keep unclean data in the database. B3 showed time grows linearly, 
+#            so a year of the new network (about 3.9 million readings) is a 
+#            matter of seconds with pandas and a few times longer with loops. 
+#  ANALYSE : SQL GROUP BY on the indexed table for the daily/monthly reports; 
+#            pandas only for ad-hoc studies; matplotlib for the charts. 
+#  AI      : the lexicon scorer is fast enough (the whole month in well under 
+#            a second) and every decision can be explained, so use it for 
+#            quick triage and counting. But its agreement with a human reader 
+#            is only the percentage measured above and it fails on sarcasm, 
+#            mixed opinions and words it does not know. Therefore: keep it as a 
+#            first filter, label a few thousand complaints by hand, and train a 
+#            model (e.g. Naive Bayes, later a pre-trained language model) if 
+#            the board needs higher accuracy - judged on the same labelled test 
+#            set, since a trained model costs more memory and time per 
+#            complaint, but at 50,000 complaints a month even that is affordable. 

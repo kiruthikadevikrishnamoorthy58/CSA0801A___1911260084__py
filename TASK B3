@@ -1,0 +1,137 @@
+# TASK B3 - Loops vs Libraries vs SQL: the daily mean PM2.5 per station 
+import cProfile, csv, io, pstats, sqlite3, statistics, time, tracemalloc 
+import numpy as np 
+import pandas as pd 
+  
+STATIONS = [f"S{i:03d}" for i in range(1, 121)]          # up to 120 stations 
+  
+def make_csv(n_stations, days=365, seed=7): 
+    """CSV text: station,day,hour,pm25 - about 8,760 readings per station.""" 
+    g = np.random.default_rng(seed) 
+    st = np.repeat(STATIONS[:n_stations], days * 24) 
+    day = np.tile(np.repeat(np.arange(days), 24), n_stations) 
+    hour = np.tile(np.arange(24), days * n_stations) 
+    pm = (60 + 10 * np.sin(day / 58) + g.normal(0, 12, len(st))).round(1) 
+    lines = [f"{s},{d},{h},{p}" for s, d, h, p in zip(st, day, hour, pm)] 
+    return "station,day,hour,pm25\n" + "\n".join(lines) 
+  
+# --------------------------------------------------------------------------- 
+# Method 1: plain Python loops with the csv module (store readings, then mean) 
+# --------------------------------------------------------------------------- 
+def mean_loops(text): 
+    groups = {} 
+    for r in csv.DictReader(io.StringIO(text)): 
+        groups.setdefault((r["station"], int(r["day"])), []).append(float(r["pm25"])) 
+    return {k: statistics.mean(v) for k, v in groups.items()} 
+  
+# Method 2: pandas groupby 
+def mean_pandas(text): 
+    df = pd.read_csv(io.StringIO(text)) 
+    return df.groupby(["station", "day"])["pm25"].mean().to_dict() 
+  
+# Method 3: SQL GROUP BY (load into SQLite, then query) 
+def mean_sql(text): 
+    con = sqlite3.connect(":memory:") 
+    con.execute("CREATE TABLE r (station TEXT, day INT, hour INT, pm25 REAL)") 
+    rows = csv.reader(io.StringIO(text)); next(rows) 
+    con.executemany("INSERT INTO r VALUES (?,?,?,?)", rows) 
+    out = con.execute("SELECT station, day, AVG(pm25) FROM r GROUP BY station, day") 
+    return {(s, d): m for s, d, m in out} 
+  
+# --------------------------------------------------------------------------- 
+# B3.1 CORRECTNESS on small data: all three methods must agree 
+# --------------------------------------------------------------------------- 
+small = make_csv(2, days=3) 
+a, b, c = mean_loops(small), mean_pandas(small), mean_sql(small) 
+same = (a.keys() == b.keys() == c.keys() and 
+        all(abs(a[k] - b[k]) < 1e-9 and abs(a[k] - c[k]) < 1e-9 for k in a)) 
+print("Groups:", len(a), "| loops == pandas == SQL:", same) 
+for k in sorted(a)[:3]: 
+    print(f"  {k}: loops {a[k]:.3f} pandas {b[k]:.3f} sql {c[k]:.3f}") 
+  
+# --------------------------------------------------------------------------- 
+# B3.2 INCREASE THE DATA SIZE: 1, 12 and 120 stations for a year 
+# --------------------------------------------------------------------------- 
+print(f"\n{'stations':>9} {'readings':>10} {'loops':>9} {'pandas':>9} " 
+      f"{'SQL load+query':>15} {'SQL query only':>15}") 
+texts = {} 
+for n in (1, 12, 120): 
+    text = texts[n] = make_csv(n) 
+    t = time.perf_counter(); mean_loops(text); t1 = time.perf_counter() - t 
+    t = time.perf_counter(); mean_pandas(text); t2 = time.perf_counter() - t 
+    t = time.perf_counter(); mean_sql(text); t3 = time.perf_counter() - t 
+    # query only: data already stored (what a daily automated report would do) 
+    con = sqlite3.connect(":memory:") 
+    con.execute("CREATE TABLE r (station TEXT, day INT, hour INT, pm25 REAL)") 
+    rows = csv.reader(io.StringIO(text)); next(rows) 
+27 
+    con.executemany("INSERT INTO r VALUES (?,?,?,?)", rows) 
+    t = time.perf_counter() 
+    con.execute("SELECT station, day, AVG(pm25) FROM r GROUP BY station, day" 
+                ).fetchall() 
+    t4 = time.perf_counter() - t 
+    print(f"{n:>9} {n * 8760:>10,} {t1:>8.3f}s {t2:>8.3f}s {t3:>14.3f}s {t4:>14.3f}s") 
+  
+# --------------------------------------------------------------------------- 
+# B3.3 PROFILE the plain-Python version with cProfile (120 stations) 
+# --------------------------------------------------------------------------- 
+profiler = cProfile.Profile() 
+profiler.enable(); mean_loops(texts[120]); profiler.disable() 
+stats = pstats.Stats(profiler) 
+top = sorted(stats.stats.items(), key=lambda kv: kv[1][2], reverse=True)[:5] 
+print("\ncProfile - functions with the most own time (mean_loops, 120 stations):") 
+print(f"  {'function':44}{'calls':>10}{'own time':>10}") 
+for (path, line, func), (cc, nc, own, cum, callers) in top: 
+    print(f"  {func[:42]:44}{nc:>10,}{own:>9.3f}s") 
+# The most time is spent in csv.DictReader.__next__ (reading and splitting 
+# each of the 1,051,200 lines and building a dictionary for it), then in the 
+# body of mean_loops itself (float() / int() conversion and list appends). 
+# statistics.mean (the _sum and as_integer_ratio entries) is the third big 
+# cost because it adds exact fractions: so reading the data costs more than the 
+# arithmetic. (cProfile itself slows the program, so use the proportions, not 
+# the exact seconds.) 
+  
+# --------------------------------------------------------------------------- 
+# B3.4 ENGINEERING TRADE-OFF 
+# --------------------------------------------------------------------------- 
+# Observed: all three give identical answers. Plain loops are slowest and grow 
+# in a straight line with the data. pandas is fastest for a ONE-TIME analysis 
+# of a file already on disk (a few lines, runs in compiled code), but must hold 
+# the whole table in memory. SQL load+query is slower than pandas because 
+# inserting every row costs time, BUT once the data is stored the GROUP BY 
+# query alone is quick, and repeats cost no loading at all. 
+# DECISION: 
+#   quick one-time analysis  -> pandas (shortest code, fastest to write and run) 
+#   daily automated report   -> SQLite + GROUP BY: store each day's clean data 
+#                               once, query only what is needed, data persists, 
+#                               and results are repeatable and easy to check. 
+# Plain loops: only for tiny files or when no library may be installed. 
+  
+# --------------------------------------------------------------------------- 
+# ALTERNATIVE: ONE pass with a running sum and count per (station, day) 
+# --------------------------------------------------------------------------- 
+def mean_running(text): 
+    sums, counts = {}, {} 
+    for r in csv.DictReader(io.StringIO(text)): 
+        key = (r["station"], int(r["day"])) 
+        sums[key] = sums.get(key, 0.0) + float(r["pm25"]) 
+        counts[key] = counts.get(key, 0) + 1 
+    return {k: sums[k] / counts[k] for k in sums} 
+  
+print("\nRunning-sum version equals statistics.mean version:", 
+      all(abs(mean_running(small)[k] - a[k]) < 1e-9 for k in a)) 
+print(f"\n{'method (12 stations)':26}{'time':>9}{'peak memory MB':>16}") 
+for name, func in [("store all + statistics.mean", mean_loops), 
+                   ("running sum + count", mean_running)]: 
+    t = time.perf_counter(); func(texts[12]); t_run = time.perf_counter() - t 
+    tracemalloc.start(); func(texts[12]) 
+    peak = tracemalloc.get_traced_memory()[1] / 1e6; tracemalloc.stop() 
+    print(f"{name:26}{t_run:>8.3f}s{peak:>16.1f}") 
+# Time : O(n) for both - every reading is visited once; the running-sum version 
+#        skips building lists and calling statistics.mean (which is slow, it 
+#        uses exact fractions), so its constant factor is smaller. 
+# Space: storing all readings first needs O(n) memory (every float kept); 
+#        the running sums keep only two numbers per (station, day) group: 
+#        O(stations x days) = 12 x 365 here, far smaller than n = 105,120. 
+#        (The csv text itself is already in memory here; reading the file line 
+#        by line would make the running-sum version use little memory in total.)

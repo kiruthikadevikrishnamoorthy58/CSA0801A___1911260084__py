@@ -1,0 +1,184 @@
+# TASK A1 - Design the Data Acquisition (City Air-Quality Monitoring Network) 
+# Pipeline: Acquire -> Inspect -> Clean -> Normalise -> Store -> Query ... 
+import csv, io, os, random, sqlite3, tempfile, time 
+import pandas as pd 
+  
+# --------------------------------------------------------------------------- 
+# A1.1 INSPECT THE SOURCE 
+# One CSV per station per day: date, hour, pm25, pm10, no2, temp. 
+# Below is a SMALL sample showing every data-quality problem I expect. 
+# --------------------------------------------------------------------------- 
+SAMPLE = """date,hour,pm25,pm10,no2,temp 
+2026-10-01,0,48,90,31,27.5 
+2026-10-01,1,,88,30,27.1 
+2026-10-01,2,NA,85,29,26.8 
+2026-10-01,3,-5,80,28,26.5 
+2026-10-01,4,5400,82,27,26.2 
+2026-10-01,5,52,95,33,80.6 
+2026-10-01,5,52,95,33,80.6 
+01/10/2026,6,61,101,35,27.9 
+""" 
+PROBLEMS = [ 
+    ("Missing value (blank)",       "2026-10-01,1,,88,30,27.1"), 
+    ("Missing value ('NA' text)",   "2026-10-01,2,NA,85,29,26.8"), 
+    ("Negative reading (fault)",    "2026-10-01,3,-5,80,28,26.5"), 
+    ("Impossibly large (fault)",    "2026-10-01,4,5400,82,27,26.2"), 
+    ("Temperature in Fahrenheit",   "2026-10-01,5,52,95,33,80.6  (= 27 C)"), 
+    ("Duplicate row",               "2026-10-01,5,52,95,33,80.6  (twice)"), 
+    ("Different date format",       "01/10/2026,6,61,101,35,27.9"), 
+] 
+print("Structure of a station CSV:", next(csv.reader(io.StringIO(SAMPLE)))) 
+print("\nExpected data-quality problems (with an example of each):") 
+for name, example in PROBLEMS: 
+    print(f"  {name:28} e.g. {example}") 
+  
+# Confirm by inspecting the sample with code 
+rows = list(csv.DictReader(io.StringIO(SAMPLE))) 
+missing = sum(1 for r in rows if r["pm25"].strip() in ("", "NA")) 
+negative = sum(1 for r in rows 
+               if r["pm25"].lstrip("-").isdigit() and float(r["pm25"]) < 0) 
+huge = sum(1 for r in rows if r["pm25"].isdigit() and float(r["pm25"]) > 999) 
+dups = len(rows) - len({tuple(r.values()) for r in rows}) 
+print(f"\nFound in sample: {missing} missing, {negative} negative, " 
+      f"{huge} huge, {dups} duplicate") 
+  
+# --------------------------------------------------------------------------- 
+# A1.2 DESIGN THE STORAGE (SQLite) 
+# --------------------------------------------------------------------------- 
+SCHEMA = """ 
+CREATE TABLE stations ( 
+    station_id INTEGER PRIMARY KEY,      -- surrogate key 
+    name       TEXT NOT NULL UNIQUE,     -- 'Adyar' (standard Title case) 
+    temp_unit  TEXT NOT NULL DEFAULT 'C' -- 'C' or 'F' (2 stations send F) 
+); 
+CREATE TABLE readings ( 
+    station_id INTEGER NOT NULL REFERENCES stations(station_id), 
+    day        TEXT    NOT NULL,         -- 'YYYY-MM-DD' 
+    hour       INTEGER NOT NULL,         -- 0..23 
+    pm25       REAL,                     -- ug/m3 (NULL = missing) 
+    pm10       REAL, 
+    no2        REAL, 
+2 
+    temp_c     REAL,                     -- always stored in Celsius 
+    PRIMARY KEY (station_id, day, hour)  -- one reading per station per hour 
+                                         -- (also rejects duplicate rows) 
+); 
+CREATE INDEX idx_station_day ON readings(station_id, day); 
+""" 
+con = sqlite3.connect(":memory:") 
+con.executescript(SCHEMA) 
+print("\nTables created:", 
+      [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")]) 
+print("readings columns (name, type, primary-key position):") 
+for cid, name, typ, notnull, default, pk in con.execute("PRAGMA table_info(readings)"): 
+    print(f"  {name:11}{typ:9}pk={pk}") 
+  
+# How CSV columns map to the tables 
+MAPPING = {"file name / folder": "stations.name (station)", 
+           "date": "readings.day (ISO text)", "hour": "readings.hour", 
+           "pm25": "readings.pm25", "pm10": "readings.pm10", 
+           "no2": "readings.no2", 
+           "temp": "readings.temp_c (converted from F if stations.temp_unit='F')"} 
+print("\nCSV column -> table column") 
+for k, v in MAPPING.items(): 
+    print(f"  {k:20} -> {v}") 
+# Why two tables: station facts (name, unit) are stored ONCE instead of being 
+# repeated in every reading row; the composite primary key prevents duplicates. 
+  
+# --------------------------------------------------------------------------- 
+# A1.3 CSV or SQL?  Build a realistic October: 12 stations x 31 days x 24 h 
+# --------------------------------------------------------------------------- 
+STATIONS = ["Adyar", "Guindy", "Velachery", "T Nagar", "Anna Nagar", "Mylapore", 
+            "Tambaram", "Perungudi", "Kodambakkam", "Egmore", "Royapuram", "Manali"] 
+rnd = random.Random(1) 
+folder = tempfile.mkdtemp() 
+all_rows = [] 
+for sid, name in enumerate(STATIONS, 1): 
+    base = 40 + 6 * sid 
+    for d in range(1, 32): 
+        day = f"2026-10-{d:02d}" 
+        lines = ["date,hour,pm25,pm10,no2,temp"] 
+        for h in range(24): 
+            rush = 25 if h in (8, 9, 18, 19, 20) else 0 
+            pm = round(base + rush + rnd.gauss(0, 8), 1) 
+            lines.append(f"{day},{h},{pm},{pm*1.8:.1f},{20+rnd.random()*20:.1f}," 
+                         f"{26+rnd.gauss(0,2):.1f}") 
+            all_rows.append((sid, day, h, pm)) 
+        with open(os.path.join(folder, f"{name}_{day}.csv"), "w") as f: 
+            f.write("\n".join(lines)) 
+print(f"\nWrote {len(os.listdir(folder))} CSV files ({len(all_rows):,} readings)") 
+  
+con.executemany("INSERT INTO stations(station_id, name) VALUES (?, ?)", 
+                list(enumerate(STATIONS, 1))) 
+con.executemany( 
+    "INSERT INTO readings(station_id, day, hour, pm25) VALUES (?,?,?,?)", all_rows) 
+con.commit() 
+  
+def timed(func): 
+    start = time.perf_counter(); result = func() 
+    return result, time.perf_counter() - start 
+  
+# Question 1: average PM2.5 of Adyar in October 
+def q1_csv(): 
+    total = count = 0 
+    for fn in os.listdir(folder): 
+        if fn.startswith("Adyar_"): 
+            for r in csv.DictReader(open(os.path.join(folder, fn))): 
+                total += float(r["pm25"]); count += 1 
+    return round(total / count, 2) 
+def q1_sql(): 
+    sql = """SELECT AVG(pm25) FROM readings r JOIN stations s USING(station_id) 
+             WHERE s.name='Adyar' AND day LIKE '2026-10%'""" 
+    return round(con.execute(sql).fetchone()[0], 2) 
+3 
+  
+# Question 2: which hour of the day has the worst (highest) average PM2.5? 
+def q2_csv(): 
+    tot = [0.0] * 24; cnt = [0] * 24 
+    for fn in os.listdir(folder): 
+        for r in csv.DictReader(open(os.path.join(folder, fn))): 
+            tot[int(r["hour"])] += float(r["pm25"]); cnt[int(r["hour"])] += 1 
+    means = [t / c for t, c in zip(tot, cnt)] 
+    return means.index(max(means)) 
+def q2_sql(): 
+    return con.execute("""SELECT hour FROM readings GROUP BY hour 
+                          ORDER BY AVG(pm25) DESC LIMIT 1""").fetchone()[0] 
+  
+# Question 3: stations whose October mean PM2.5 is above 80 
+def q3_csv(): 
+    tot, cnt = {}, {} 
+    for fn in os.listdir(folder): 
+        st = fn.rsplit("_", 1)[0] 
+        for r in csv.DictReader(open(os.path.join(folder, fn))): 
+            tot[st] = tot.get(st, 0) + float(r["pm25"]); cnt[st] = cnt.get(st, 0) + 1 
+    return sorted(s for s in tot if tot[s] / cnt[s] > 80) 
+def q3_sql(): 
+    return sorted(r[0] for r in con.execute("""SELECT s.name FROM readings r 
+        JOIN stations s USING(station_id) GROUP BY s.name 
+        HAVING AVG(pm25) > 80""")) 
+  
+print(f"\n{'Question':36}{'CSV files':>12}{'SQL':>10}  same answer") 
+for label, fc, fs in [("Q1 avg PM2.5, Adyar, October", q1_csv, q1_sql), 
+                      ("Q2 worst hour of the day", q2_csv, q2_sql), 
+                      ("Q3 stations with mean above 80", q3_csv, q3_sql)]: 
+    (rc, tc), (rs, ts) = timed(fc), timed(fs) 
+    shown = f"{len(rc)} stations" if isinstance(rc, list) else rc 
+    print(f"{label:36}{tc:>11.4f}s{ts:>9.4f}s  {rc == rs}  ({shown})") 
+  
+# --------------------------------------------------------------------------- 
+# ALTERNATIVE: keep CSV only and load into a pandas DataFrame for each question 
+# --------------------------------------------------------------------------- 
+def pandas_q1(): 
+    df = pd.concat((pd.read_csv(os.path.join(folder, fn)).assign(st=fn.split("_")[0]) 
+                    for fn in os.listdir(folder))) 
+    return round(df[df.st == "Adyar"].pm25.mean(), 2) 
+r, t = timed(pandas_q1) 
+print(f"pandas (reload all CSV for the question): Q1 = {r} in {t:.4f}s") 
+# Time per question: CSV/pandas must open and scan ALL n readings every time 
+# = O(n) (plus file opening cost). SQLite with an index on (station_id, day) 
+# jumps straight to the needed rows = about O(log n + k) for k matching rows 
+# (a GROUP BY over every row is still O(n), but without opening 372 files). 
+# Space: pandas holds the whole data in MEMORY (about n x columns x 8 bytes); 
+# SQLite keeps data on DISK and brings only the needed pages into memory. 
+# Conclusion: SQLite for repeated questions; CSV stays only as the daily 
+# delivery format from the stations.

@@ -1,0 +1,302 @@
+# TASK B1 - Implement and Validate the Cleaning Pipeline 
+import csv, io, random, sqlite3, textwrap, time, tracemalloc 
+from datetime import datetime 
+import matplotlib 
+matplotlib.use("Agg")                       # draw charts to a file (no window) 
+import matplotlib.pyplot as plt 
+import numpy as np 
+import pandas as pd 
+# =========================================================================== 
+# THE PROGRAM FROM THE QUESTION (TODO 1 and TODO 2 completed) 
+# =========================================================================== 
+RAW = """station,date,pm25 
+Adyar,2026-10-01,48 
+Adyar,2026-10-02,NA 
+Adyar,2026-10-03, 
+Guindy,2026-10-01,95 
+Guindy,2026-10-02,-5 
+Guindy,2026-10-03,121 
+"""
+def load_clean(text): 
+    """Returns (station, date, pm25) tuples for valid, non-negative readings only.""" 
+    rows = [] 
+    # TODO 1: read with csv.DictReader; skip empty, 'NA' or negative pm25; 
+    #         skip values above 999 (extra check asked in the question) 
+    for r in csv.DictReader(io.StringIO(text)): 
+        value = r["pm25"].strip() 
+        if value == "" or value == "NA": 
+            continue                               # missing 
+        value = float(value)                       # convert to float 
+        if value < 0 or value > 999: 
+            continue                               # negative or impossibly large 
+        rows.append((r["station"], r["date"], value)) 
+    return rows 
+  
+def min_max(values): 
+    # TODO 2: scale to 0-1 with (v - min) / (max - min), rounded to 3 decimals 
+    lo, hi = min(values), max(values) 
+    return [round((v - lo) / (hi - lo), 3) for v in values] 
+  
+clean = load_clean(RAW) 
+print(clean) 
+print(min_max([pm for _, _, pm in clean])) 
+  
+# Extra check requested: a test row above 999 must be skipped 
+RAW_TEST = RAW + "Adyar,2026-10-04,5400\n" 
+print("test row 5400 skipped:", len(load_clean(RAW_TEST)) == len(clean)) 
+  
+# =========================================================================== 
+# B1.1 VALIDATE THE FULL CLEANING RULES on a small file with EVERY problem 
+# =========================================================================== 
+F_STATIONS = {"Guindy", "Manali"}              # the two stations that send Fahrenheit 
+  
+def to_iso(text): 
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"): 
+        try: 
+            return datetime.strptime(text.strip(), fmt).strftime("%Y-%m-%d") 
+        except ValueError: 
+            pass 
+    raise ValueError(f"unknown date format {text!r}") 
+  
+def number(text, low=0, high=999): 
+    """float, or None when blank / 'NA' / negative / impossibly large.""" 
+17 
+    text = text.strip() 
+    if text in ("", "NA"): 
+        return None 
+    v = float(text) 
+    return v if low <= v <= high else None 
+  
+def clean_station_text(station, text): 
+    """Cleans ONE station's CSV text -> list of tuples 
+    (station, day, hour, pm25, pm10, no2, temp_c)""" 
+    station = station.strip().title() 
+    seen, rows = set(), [] 
+    for r in csv.DictReader(io.StringIO(text)): 
+        key = (to_iso(r["date"]), int(r["hour"])) 
+        if key in seen: 
+            continue                                   # duplicate row 
+        seen.add(key) 
+        temp = float(r["temp"]) 
+        if station in F_STATIONS: 
+            temp = (temp - 32) * 5 / 9                 # Fahrenheit -> Celsius 
+        rows.append([station, key[0], key[1], number(r["pm25"]), number(r["pm10"]), 
+                     number(r["no2"]), round(temp, 1)]) 
+    for col in (3, 4, 5):                              # forward fill, per station 
+        last = None 
+        for row in rows: 
+            if row[col] is None: 
+                row[col] = last 
+            else: 
+                last = row[col] 
+    return [tuple(r) for r in rows] 
+  
+PROBLEM_FILE = """date,hour,pm25,pm10,no2,temp 
+2026-10-01,0,48,90,31,81.5 
+2026-10-01,1,,88,30,80.8 
+2026-10-01,2,NA,85,29,80.2 
+2026-10-01,3,-5,80,28,79.7 
+2026-10-01,4,5400,82,27,79.2 
+2026-10-01,5,52,95,33,80.6 
+2026-10-01,5,52,95,33,80.6 
+01/10/2026,6,61,101,35,82.2 
+""" 
+print("\nBEFORE cleaning (station 'GUINDY' sends Fahrenheit):") 
+print(PROBLEM_FILE) 
+print("AFTER cleaning (station, day, hour, pm25, pm10, no2, temp_c):") 
+for row in clean_station_text(" GUINDY ", PROBLEM_FILE): 
+    print(" ", row) 
+# Result: blank, 'NA', -5 and 5400 became filled values; the duplicate hour 5 
+# row was removed; 80.6 F became 27.0 C; '01/10/2026' became 2026-10-01. 
+  
+# =========================================================================== 
+# B1.2 COMPARE WITH THE PART A DESIGN 
+#  Changes made while coding, and why: 
+#  1. Forward fill is done PER STATION (and per column). My A2 design filled 
+#     one list, so the last Adyar value could be copied into the first blank of 
+#     the next station. 
+#  2. pm10 and no2 get the same rules as pm25 (A2 only described pm25). 
+#  3. Upper limit 999 added (the question asks for it) - A2 listed it, but only 
+#     as part of the rule for impossible values. 
+#  4. Duplicates are found by the key (day, hour) inside one station, as the 
+#     database primary key (station, day, hour) will require. 
+# =========================================================================== 
+  
+# =========================================================================== 
+# DATA FOR THE CASE STUDY: 12 stations, October 2026, hourly (simulated files) 
+# =========================================================================== 
+STATIONS = ["Adyar", "Guindy", "Velachery", "T Nagar", "Anna Nagar", "Mylapore", 
+            "Tambaram", "Perungudi", "Kodambakkam", "Egmore", "Royapuram", "Manali"] 
+  
+def make_station_csv(sid, name, rnd): 
+    lines = ["date,hour,pm25,pm10,no2,temp"] 
+    for d in range(1, 32): 
+        for h in range(24): 
+18 
+            temp_c = 29 + 3 * np.sin((h - 9) / 24 * 2 * np.pi) + rnd.gauss(0, 0.8) 
+            rush = 28 if h in (8, 9, 19, 20) else 0 
+            pm = 38 + 5 * sid + rush + 2.5 * (29 - temp_c) + rnd.gauss(0, 7) 
+            temp = temp_c * 9 / 5 + 32 if name in F_STATIONS else temp_c 
+            date = f"2026-10-{d:02d}" 
+            if rnd.random() < 0.01: 
+                date = f"{d:02d}/10/2026"                    # other date format 
+            pm_text = f"{pm:.1f}" 
+            x = rnd.random()                                 # inject faults 
+            if x < 0.03: 
+                pm_text = rnd.choice(["", "NA"]) 
+            elif x < 0.035: 
+                pm_text = "-5" 
+            elif x < 0.038: 
+                pm_text = "5400" 
+            row = f"{date},{h},{pm_text},{pm*1.7:.1f},{22+rnd.random()*18:.1f},{temp:.1f}" 
+            lines.append(row) 
+            if rnd.random() < 0.005: 
+                lines.append(row)                            # duplicate row 
+    return "\n".join(lines) 
+  
+rnd = random.Random(11) 
+raw_files = {name.upper(): make_station_csv(i, name, rnd) 
+             for i, name in enumerate(STATIONS, 1)} 
+n_raw = sum(t.count("\n") for t in raw_files.values()) 
+cleaned = [] 
+for name, text in raw_files.items(): 
+    cleaned += clean_station_text(name, text) 
+print(f"\nRaw rows: {n_raw:,} | clean rows: {len(cleaned):,} " 
+      f"| duplicates removed: {n_raw - len(cleaned):,}") 
+print("rows still missing pm25 after cleaning:", 
+      sum(1 for r in cleaned if r[3] is None)) 
+  
+# =========================================================================== 
+# B1.3 STORE AND QUERY (SQLite, executemany) 
+# =========================================================================== 
+con = sqlite3.connect(":memory:") 
+con.executescript(""" 
+CREATE TABLE stations (station_id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL); 
+CREATE TABLE readings (station_id INTEGER NOT NULL REFERENCES stations(station_id), 
+    day TEXT NOT NULL, hour INTEGER NOT NULL, pm25 REAL, pm10 REAL, no2 REAL, 
+    temp_c REAL, PRIMARY KEY (station_id, day, hour)); 
+CREATE INDEX idx_station_day ON readings(station_id, day);""") 
+con.executemany("INSERT INTO stations(station_id, name) VALUES (?, ?)", 
+                list(enumerate(STATIONS, 1))) 
+ids = {name: i for i, name in enumerate(STATIONS, 1)} 
+con.executemany( 
+    "INSERT INTO readings VALUES (?,?,?,?,?,?,?)", 
+    [(ids[r[0]],) + r[1:] for r in cleaned]) 
+con.commit() 
+print("rows stored:", con.execute("SELECT COUNT(*) FROM readings").fetchone()[0]) 
+  
+print("\nSQL Q1 - average PM2.5 of Adyar in October:") 
+print("  ", con.execute("""SELECT ROUND(AVG(pm25), 2) FROM readings r JOIN stations s 
+      USING(station_id) WHERE s.name = ? AND day LIKE '2026-10%'""", 
+      ("Adyar",)).fetchone()[0]) 
+print("SQL Q2 - the 3 hours with the worst average PM2.5:") 
+for hour, avg in con.execute("""SELECT hour, ROUND(AVG(pm25), 1) FROM readings 
+                                GROUP BY hour ORDER BY AVG(pm25) DESC LIMIT 3"""): 
+    print(f"   hour {hour:02d}:00  mean {avg}") 
+print("SQL Q3 - stations above 60 ug/m3 (24-hour standard) for the month:") 
+for name, avg in con.execute("""SELECT s.name, ROUND(AVG(pm25), 1) FROM readings r 
+      JOIN stations s USING(station_id) GROUP BY s.name HAVING AVG(pm25) > 60 
+      ORDER BY AVG(pm25) DESC"""): 
+    print(f"   {name:12} {avg}") 
+  
+# =========================================================================== 
+# B1.4 VISUALISE (charts designed in A3.1) + interpretation 
+# =========================================================================== 
+daily = pd.read_sql_query("""SELECT day, AVG(pm25) AS pm25 FROM readings 
+    WHERE station_id = 1 GROUP BY day ORDER BY day""", con) 
+19 
+by_station = pd.read_sql_query("""SELECT s.name, AVG(pm25) AS pm25 FROM readings r 
+    JOIN stations s USING(station_id) GROUP BY s.name ORDER BY pm25""", con) 
+by_hour = pd.read_sql_query("""SELECT hour, AVG(pm25) AS pm25 FROM readings 
+    GROUP BY hour ORDER BY hour""", con) 
+scatter = pd.read_sql_query("""SELECT temp_c, pm25 FROM readings 
+    WHERE station_id = 1""", con) 
+  
+fig, ax = plt.subplots(2, 2, figsize=(11, 8)) 
+ax[0, 0].plot(daily["day"].str[-2:].astype(int), daily["pm25"], marker="o") 
+ax[0, 0].set(title="Daily mean PM2.5 at Adyar, October 2026", 
+             xlabel="Day of October", ylabel="PM2.5 (ug/m3)") 
+ax[0, 1].barh(by_station["name"], by_station["pm25"]) 
+ax[0, 1].set(title="Mean PM2.5 by station, October 2026", 
+             xlabel="PM2.5 (ug/m3)", ylabel="Station") 
+ax[1, 0].scatter(scatter["temp_c"], scatter["pm25"], s=6) 
+ax[1, 0].set(title="Temperature vs PM2.5 at Adyar (hourly)", 
+             xlabel="Temperature (C)", ylabel="PM2.5 (ug/m3)") 
+ax[1, 1].bar(by_hour["hour"], by_hour["pm25"]) 
+ax[1, 1].set(title="Mean PM2.5 by hour of day (all stations)", 
+             xlabel="Hour of day", ylabel="PM2.5 (ug/m3)") 
+plt.tight_layout() 
+plt.savefig("b1_charts.png", dpi=110) 
+print("\nCharts saved to b1_charts.png (shown below the output)") 
+  
+# Interpretation (numbers come from the data above) 
+def show(text): 
+    print(textwrap.fill(text, 86, subsequent_indent="    ")) 
+  
+hi, lo = daily.loc[daily.pm25.idxmax()], daily.loc[daily.pm25.idxmin()] 
+show(f"Chart 1 (line): Adyar's daily mean stays between {lo.pm25:.1f} (day " 
+     f"{lo.day[-2:]}) and {hi.pm25:.1f} (day {hi.day[-2:]}). There is no steady " 
+     f"rise or fall, so the month shows ordinary day-to-day variation, not a trend.") 
+worst, best = by_station.iloc[-1], by_station.iloc[0] 
+over = int((by_station.pm25 > 60).sum()) 
+show(f"Chart 2 (bar): {worst['name']} is the most polluted ({worst.pm25:.1f}) and " 
+     f"{best['name']} the cleanest ({best.pm25:.1f}); {over} of 12 stations are " 
+     f"above the 60 ug/m3 24-hour limit, so the problem is city-wide.") 
+r = np.corrcoef(scatter.temp_c, scatter.pm25)[0, 1] 
+show(f"Chart 3 (scatter): correlation r = {r:.2f}. Cooler hours (night, early " 
+     f"morning) tend to have higher PM2.5; the relation is moderate, not exact, " 
+     f"and correlation is not proof of cause.") 
+top = by_hour.sort_values("pm25", ascending=False).head(4)["hour"].tolist() 
+show(f"Chart 4 (bar): the worst hours are {sorted(top)} - the morning and evening " 
+     f"traffic peaks - so traffic control at these hours would help most. " 
+     f"(The data here is simulated; real data is needed for real decisions.)") 
+  
+# =========================================================================== 
+# ALTERNATIVE: pandas (read_csv, replace/dropna, vectorised normalisation) 
+# =========================================================================== 
+def make_raw(n, seed=4): 
+    g = np.random.default_rng(seed) 
+    pm = g.normal(70, 20, n).round(1).astype(str) 
+    bad = g.random(n) 
+    pm[bad < 0.03] = "NA" 
+    pm[(bad >= 0.03) & (bad < 0.06)] = "" 
+    pm[(bad >= 0.06) & (bad < 0.07)] = "-5" 
+    pm[(bad >= 0.07) & (bad < 0.075)] = "5400" 
+    st = g.choice(STATIONS, n) 
+    return "station,date,pm25\n" + "\n".join( 
+        f"{s},2026-10-01,{p}" for s, p in zip(st, pm)) 
+  
+def clean_loops(text): 
+    vals = [] 
+    for r in csv.DictReader(io.StringIO(text)): 
+        v = r["pm25"].strip() 
+        if v and v != "NA" and 0 <= float(v) <= 999: 
+            vals.append(float(v)) 
+    lo, hi = min(vals), max(vals) 
+    return [(v - lo) / (hi - lo) for v in vals] 
+  
+def clean_pandas(text): 
+20 
+    df = pd.read_csv(io.StringIO(text), na_values=["NA", ""]) 
+    df = df[(df.pm25 >= 0) & (df.pm25 <= 999)].dropna()      # also drops NaN 
+    return (df.pm25 - df.pm25.min()) / (df.pm25.max() - df.pm25.min()) 
+  
+print(f"\n{'rows':>10} {'loops time':>11} {'pandas time':>12} " 
+      f"{'loops MB':>9} {'pandas MB':>10}") 
+for n in (1_000, 100_000, 1_000_000): 
+    text = make_raw(n) 
+    t = time.perf_counter(); a = clean_loops(text); t_loop = time.perf_counter() - t 
+    t = time.perf_counter(); b = clean_pandas(text); t_pd = time.perf_counter() - t 
+    assert len(a) == len(b)                                  # same rows kept 
+    tracemalloc.start(); clean_loops(text) 
+    m_loop = tracemalloc.get_traced_memory()[1] / 1e6; tracemalloc.stop() 
+    tracemalloc.start(); clean_pandas(text) 
+    m_pd = tracemalloc.get_traced_memory()[1] / 1e6; tracemalloc.stop() 
+    print(f"{n:>10,} {t_loop:>10.4f}s {t_pd:>11.4f}s {m_loop:>9.1f} {m_pd:>10.1f}") 
+# Both need O(n) time; pandas does the work in compiled C/NumPy code, so its 
+# time per row is much smaller once n is large (at 1,000 rows the cost of 
+# importing/starting pandas machinery dominates and the loop version is as 
+# fast or faster). Memory is of a similar order: pandas stores numbers compactly 
+# (8 bytes each) but parses the whole text into columns at once, so its peak was 
+# a little higher here; the csv loop keeps Python float objects (about 24 bytes 
+# each plus a list pointer).

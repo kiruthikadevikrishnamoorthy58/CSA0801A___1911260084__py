@@ -1,0 +1,140 @@
+# TASK A4 - Plan Debugging and Profiling (for the cleaning code) 
+import cProfile, io, logging, pstats, random, sys, time, timeit 
+  
+# The function under test: a cleaning step with a deliberate BUG to hunt down 
+def clean_pm(values): 
+    out = [] 
+    for v in values: 
+        if v is None or v < 0 or v > 999: 
+            continue 
+        out.append(v) 
+    return out 
+  
+# --------------------------------------------------------------------------- 
+# A4.1 DEBUGGING PLAN 
+# 1. print()   - quick look at a value at one point (temporary, removed later) 
+# 2. assert    - states what MUST be true; fails loudly at the exact line 
+# 3. logging   - permanent, levelled messages (DEBUG/INFO/WARNING/ERROR) that 
+#                can be switched on or off without editing the code 
+# 4. pdb       - pause the program and step through it line by line 
+# --------------------------------------------------------------------------- 
+data = [48, None, -5, 5400, 52] 
+  
+# (1) print debugging 
+cleaned = clean_pm(data) 
+print("print  : before", data, "after", cleaned) 
+  
+# (2) assert: the number of cleaned readings can never exceed the input 
+assert len(cleaned) <= len(data), "cleaning created extra rows" 
+try: 
+    # A bug found with assert: the cleaned values must all be valid 
+    assert all(0 <= v <= 999 for v in cleaned), f"invalid value kept: {cleaned}" 
+    print("assert : all cleaned values are inside 0-999  (rule satisfied)") 
+except AssertionError as error: 
+    print("assert failed:", error) 
+# Another check that FAILS and exposes a real design problem: 
+try: 
+    assert len(cleaned) == len(data), "rows were lost - hourly series now misaligned" 
+except AssertionError as error: 
+    print("assert : FAILED ->", error) 
+# This shows the bug: dropping bad rows breaks the one-reading-per-hour 
+# structure. The fix is to replace bad values with None and fill them later. 
+  
+# (3) logging - goes to the screen here, but could go to a file 
+logging.basicConfig(stream=sys.stdout, level=logging.DEBUG, 
+                    format="log    : %(levelname)s %(message)s", force=True) 
+log = logging.getLogger("cleaning") 
+for v in data: 
+    if v is None: 
+        log.warning("missing value found") 
+    elif v < 0 or v > 999: 
+        log.error("impossible value %s rejected", v) 
+    else: 
+        log.debug("value %s accepted", v) 
+  
+# (4) pdb - interactive, so it is shown here as the commands I would use: 
+#     import pdb; pdb.set_trace()   # or  breakpoint()   (Python 3.7+) 
+#     n = next line | s = step into a call | p v = print v | c = continue 
+#     Run the whole program under it with:  python -m pdb clean.py 
+# An IDE debugger (VS Code / PyCharm) gives the same with breakpoints, a 
+# variables panel and a call stack, without typing commands. 
+  
+# --------------------------------------------------------------------------- 
+# A4.2 PROFILING PLAN 
+# --------------------------------------------------------------------------- 
+logging.disable(logging.CRITICAL)             # silence logging for the timings 
+random.seed(5) 
+11 
+big = [random.choice([None, -3, 48.5, 60.2, 5400, 75.0]) for _ in range(200_000)] 
+  
+# (a) time.perf_counter(): time one block / function once 
+t = time.perf_counter() 
+clean_pm(big) 
+print(f"\nperf_counter : clean_pm on 200,000 values took " 
+      f"{time.perf_counter() - t:.4f} s") 
+  
+# (b) timeit: repeat a SMALL snippet many times and take reliable timings 
+best = min(timeit.repeat(lambda: clean_pm(big[:10_000]), number=20, repeat=3)) 
+print(f"timeit       : 10,000 values, 20 runs, best of 3 = {best:.4f} s") 
+  
+# (c) cProfile: which FUNCTION takes the time inside a larger program? 
+def pipeline(): 
+    rows = [("Adyar", "2026-10-01", i % 24, v) for i, v in enumerate(big)] 
+    good = clean_pm([r[3] for r in rows]) 
+    return sorted(good) 
+  
+profiler = cProfile.Profile() 
+profiler.enable(); pipeline(); profiler.disable() 
+stats = pstats.Stats(profiler) 
+top = sorted(stats.stats.items(), key=lambda kv: kv[1][3], reverse=True)[:4] 
+print("\ncProfile (sorted by cumulative time):") 
+print(f"  {"function":38}{'calls':>9}{'own time':>11}{'cumulative':>12}") 
+for (path, line, func), (cc, nc, own, cum, callers) in top: 
+    print(f"  {func[:36]:38}{nc:>9}{own:>10.4f}s{cum:>11.4f}s") 
+# Plan: perf_counter for the first quick measurement, cProfile to FIND the 
+# slowest function, then timeit on that one function to check each improvement. 
+  
+# --------------------------------------------------------------------------- 
+# ALTERNATIVE: print() for all debugging instead of logging + debugger 
+# --------------------------------------------------------------------------- 
+def with_print(values, debug): 
+    n = 0 
+    for v in values: 
+        if debug: 
+            print("value", v) 
+        n += 1 
+    return n 
+  
+def with_logging(values, logger): 
+    n = 0 
+    for v in values: 
+        logger.debug("value %s", v) 
+        n += 1 
+    return n 
+  
+values = list(range(20_000)) 
+real_stdout = sys.stdout 
+sys.stdout = io.StringIO()                    # hide the 20,000 printed lines 
+t = time.perf_counter(); with_print(values, True); t_print = time.perf_counter() - t 
+sys.stdout = real_stdout 
+  
+logging.disable(logging.NOTSET) 
+quiet = logging.getLogger("quiet"); quiet.setLevel(logging.WARNING)  # DEBUG off 
+t = time.perf_counter(); with_logging(values, quiet); t_log_off = time.perf_counter() - t 
+noisy = logging.getLogger("noisy"); noisy.setLevel(logging.DEBUG) 
+noisy.propagate = False; noisy.addHandler(logging.StreamHandler(io.StringIO())) 
+t = time.perf_counter(); with_logging(values, noisy); t_log_on = time.perf_counter() - t 
+t = time.perf_counter(); with_print(values, False); t_flag_off = time.perf_counter() - t 
+  
+print("\n20,000 debug calls:") 
+print(f"  print   ON {t_print:.4f}s | flag OFF {t_flag_off:.4f}s") 
+print(f"  logging ON {t_log_on:.4f}s | level OFF {t_log_off:.4f}s") 
+# Time added: each print/log call costs a few microseconds, so thousands of 
+# calls add up to O(n) extra time; printing to a real screen or file is slower 
+# still. Logging is the most expensive when ON (it builds a record object, then 
+# formats it) but almost free when the level is raised: the call returns early. 
+# Switching OFF when finished: 
+#   print   -> must delete the lines or guard each with 'if DEBUG:' (easy to 
+#              forget one; the check itself still costs time). 
+#   logging -> change ONE setting: logging.disable(...) or setLevel(WARNING). 
+#   assert  -> run Python with the -O option and all asserts are skipped.
